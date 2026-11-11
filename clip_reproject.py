@@ -30,6 +30,7 @@ from qgis.core import QgsSettings
 
 from .clip_reproject_dialog import ClipReprojectDialog
 from .processor import Processor
+from .error_handling import execute_with_feedback
 
 
 class ClipReproject:
@@ -199,13 +200,10 @@ class ClipReproject:
             "output_folder": self.dlg.result_path.filePath(),
         }
 
-        try:
-            processed_count = Processor.process(params)
-        except (ValueError, OSError, RuntimeError) as error:
-            QMessageBox.warning(self.dlg, "Ошибка", str(error))
-            return
-        except Exception as error:
-            QMessageBox.critical(self.dlg, "Ошибка обработки", str(error))
+                processed_count = execute_with_feedback(
+            self.dlg, Processor.process, params
+        )
+        if processed_count is None:
             return
 
         if processed_count == 0:
