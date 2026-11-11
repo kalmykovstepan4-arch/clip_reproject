@@ -200,14 +200,17 @@ class ClipReproject:
             "output_folder": self.dlg.result_path.filePath(),
         }
 
-                processed_count = execute_with_feedback(
+               
+        processed_count = execute_with_feedback(
             self.dlg, Processor.process, params
         )
         if processed_count is None:
             return
 
         if processed_count == 0:
-            QMessageBox.warning(self.dlg, "Готово", "В выбранной папке не найдено SHP-файлов.")
+            QMessageBox.warning(
+                self.dlg, "Готово", "В выбранной папке не найдено SHP-файлов."
+            )
         else:
             QMessageBox.information(
                 self.dlg, "Готово", f"Обработано слоёв: {processed_count}"
