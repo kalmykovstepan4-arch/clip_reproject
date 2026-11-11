@@ -21,23 +21,16 @@
  *                                                                         *
  ***************************************************************************/
 """
-from qgis.PyQt.QtCore import QLocale, QTranslator, QCoreApplication
-from qgis.core import QgsSettings
-from qgis.PyQt.QtGui import QIcon
-from qgis.PyQt.QtWidgets import QAction
-
-# Import the code for the dialog
-from .clip_reproject_dialog import ClipReprojectDialog
-import os.path
 import os
-import processing
 
-from qgis.core import (
-    QgsVectorLayer,
-    QgsCoordinateReferenceSystem,
-    QgsProject
-)
-from qgis.PyQt.QtWidgets import QMessageBox
+from qgis.PyQt.QtCore import QCoreApplication, QLocale, QTranslator
+from qgis.PyQt.QtGui import QIcon
+from qgis.PyQt.QtWidgets import QAction, QMessageBox
+from qgis.core import QgsSettings
+
+from .clip_reproject_dialog import ClipReprojectDialog
+from .processor import Processor
+
 
 class ClipReproject:
     """QGIS Plugin Implementation."""
@@ -188,213 +181,36 @@ class ClipReproject:
 
 
     def run(self):
-        """Run method that performs all the real work"""
-
-        # Create the dialog with elements (after translation) and keep reference
-        # Only create GUI ONCE in callback, so that it will only load when the plugin is started
-        if self.first_start == True:
+        """Show the dialog, collect parameters and call the data processor."""
+        if self.first_start:
             self.first_start = False
             self.dlg = ClipReprojectDialog()
 
-        # show the dialog
         self.dlg.show()
-        # Run the dialog event loop
-        result = self.dlg.exec_()
-        # See if OK was pressed
-        if result:
-            try:
-                # Получаем значения из формы
-                osm_folder = self.dlg.osm_path.filePath()
-                adm_file = self.dlg.adm_shp.filePath()
-                field_name = self.dlg.field_name.text().strip()
-                field_value = self.dlg.field_value.text().strip()
-                epsg_text = self.dlg.epsg_code.text().strip()
-                output_folder = self.dlg.result_path.filePath()
+        if not self.dlg.exec_():
+            return
 
-                # Проверяем заполнение полей
-                if not all([
-                    osm_folder,
-                    adm_file,
-                    epsg_text,
-                    output_folder
-                ]):
-                    QMessageBox.warning(
-                        self.dlg,
-                        "Ошибка",
-                        "Заполните все поля."
-                    )
-                    return
+        params = {
+            "osm_folder": self.dlg.osm_path.filePath(),
+            "adm_file": self.dlg.adm_shp.filePath(),
+            "field_name": self.dlg.field_name.text().strip(),
+            "field_value": self.dlg.field_value.text().strip(),
+            "epsg_text": self.dlg.epsg_code.text().strip(),
+            "output_folder": self.dlg.result_path.filePath(),
+        }
 
-                # Проверяем EPSG
-                try:
-                    epsg = int(epsg_text)
-                except ValueError:
-                    QMessageBox.warning(
-                        self.dlg,
-                        "Ошибка",
-                        "EPSG-код должен быть целым числом."
-                    )
-                    return
+        try:
+            processed_count = Processor.process(params)
+        except (ValueError, OSError, RuntimeError) as error:
+            QMessageBox.warning(self.dlg, "Ошибка", str(error))
+            return
+        except Exception as error:
+            QMessageBox.critical(self.dlg, "Ошибка обработки", str(error))
+            return
 
-                target_crs = QgsCoordinateReferenceSystem(
-                    "EPSG:{}".format(epsg)
-                )
-
-                if not target_crs.isValid():
-                    QMessageBox.warning(
-                        self.dlg,
-                        "Ошибка",
-                        "Указан некорректный EPSG-код."
-                    )
-                    return
-
-                # Загружаем слой административных границ
-                adm_layer = QgsVectorLayer(
-                    adm_file,
-                    "administrative_boundary",
-                    "ogr"
-                )
-
-                if not adm_layer.isValid():
-                    QMessageBox.warning(
-                        self.dlg,
-                        "Ошибка",
-                        "Не удалось открыть файл административных границ."
-                    )
-                    return
-
-               
-                # Если фильтр заполнен, ищем нужную территорию
-                if field_name and field_value:
-                    field_names = [f.name() for f in adm_layer.fields()]
-
-                    if field_name not in field_names:
-                        QMessageBox.warning(
-                            self.dlg,
-                            "Ошибка",
-                            "В слое границ нет поля '{}'.".format(field_name)
-                        )
-                        return
-
-                    safe_value = field_value.replace("'", "''")
-                    expression = "\"{}\" = '{}'".format(
-                        field_name,
-                        safe_value
-                    )
-                    adm_layer.selectByExpression(expression)
-                    if adm_layer.selectedFeatureCount() == 0:
-                        QMessageBox.warning(
-                            self.dlg,
-                            "Ошибка",
-                            "По заданному значению территория не найдена."
-                        )
-                        return
-                else:
-                    # Без фильтра используем все объекты слоя границ
-                    adm_layer.selectAll()
-
-
-                # Сохраняем выбранную границу во временный слой
-                selected = processing.run(
-                    "native:saveselectedfeatures",
-                    {
-                        "INPUT": adm_layer,
-                        "OUTPUT": "TEMPORARY_OUTPUT"
-                    }
-                )["OUTPUT"]
-
-                # Создаём папку результата, если её ещё нет
-                os.makedirs(output_folder, exist_ok=True)
-
-                processed_count = 0
-
-                # Обрабатываем все SHP-файлы в выбранной папке
-                for file_name in os.listdir(osm_folder):
-
-                    if not file_name.lower().endswith(".shp"):
-                        continue
-
-                    input_path = os.path.join(
-                        osm_folder,
-                        file_name
-                    )
-
-                    layer = QgsVectorLayer(
-                        input_path,
-                        file_name,
-                        "ogr"
-                    )
-
-                    if not layer.isValid():
-                        continue
-
-                    base_name = os.path.splitext(file_name)[0]
-
-                    clipped_path = os.path.join(
-                        output_folder,
-                        base_name + "_clip.gpkg"
-                    )
-
-                    final_path = os.path.join(
-                        output_folder,
-                        base_name + "_gsk2011.gpkg"
-                    )
-
-                    # Обрезаем слой по выбранной территории
-                    processing.run(
-                        "native:clip",
-                        {
-                            "INPUT": layer,
-                            "OVERLAY": selected,
-                            "OUTPUT": clipped_path
-                        }
-                    )
-
-                    # Перепроецируем в указанную систему координат
-                    processing.run(
-                        "native:reprojectlayer",
-                        {
-                            "INPUT": clipped_path,
-                            "TARGET_CRS": target_crs,
-                            "OUTPUT": final_path
-                        }
-                    )
-
-                    # Добавляем готовый слой в проект QGIS
-                    result_layer = QgsVectorLayer(
-                        final_path,
-                        base_name + "_gsk2011",
-                        "ogr"
-                    )
-
-                    if result_layer.isValid():
-                        QgsProject.instance().addMapLayer(result_layer)
-
-                    # Промежуточный файл больше не нужен
-                    try:
-                        os.remove(clipped_path)
-                    except OSError:
-                        pass
-
-                    processed_count += 1
-
-                if processed_count == 0:
-                    QMessageBox.warning(
-                        self.dlg,
-                        "Готово",
-                        "В выбранной папке не найдено SHP-файлов."
-                    )
-                    return
-
-                    QMessageBox.information(
-                        self.dlg,
-                        "Готово",
-                        "Обработано слоёв: {}".format(processed_count)
-                )
-
-            except Exception as e:
-                QMessageBox.critical(
-                    self.dlg,
-                    "Ошибка",
-                    str(e)
-                )
+        if processed_count == 0:
+            QMessageBox.warning(self.dlg, "Готово", "В выбранной папке не найдено SHP-файлов.")
+        else:
+            QMessageBox.information(
+                self.dlg, "Готово", f"Обработано слоёв: {processed_count}"
+            )
